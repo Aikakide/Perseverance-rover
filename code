@@ -1,0 +1,347 @@
+#if defined(ARDUINO_ARCH_ESP32)
+
+// ESP32 cool bluetooth and web UI control
+// (Ackermann steering not yet implemented)
+// OBS: 4 motors not added yet
+//update 14.1.2026 now 6 motors + 4 servos with PCA9685
+
+#include <BluetoothSerial.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+BluetoothSerial SerialBT;
+
+// WiFi Access Point (SSID ja salasana)
+const char* ssid = "RoverBT_AP";
+const char* password = "12345678";  // note this ultimately secure password!!!! :D
+
+WebServer server(80);
+
+void handleRoot() {
+  String html = R"rawliteral(
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rover Control</title>
+    <style>
+      body { background:#111; color:#0f0; font-family:sans-serif; text-align:center; margin:0; padding:20px;}
+      h1 { margin:10px; }
+      .joystick { width:220px; height:220px; background:#333; border-radius:50%; margin:20px auto; touch-action:none; position:relative; }
+      .stick { width:60px; height:60px; background:lime; border-radius:50%; position:absolute; transform:translate(-50%,-50%); }
+      .slider { width:80%; margin:10px 0; }
+      button { width:160px; height:60px; font-size:24px; background:#c00; color:white; border:none; border-radius:8px; margin:10px; cursor:pointer; }
+      #status { font-size:18px; margin-top:20px; }
+    </style>
+  </head>
+  <body>
+    <h1>Rover Control</h1>
+    <div class="joystick" id="mainJoy">
+      <div class="stick" id="stick"></div>
+    </div>
+    <p>Max Speed: <input type="range" id="speed" class="slider" min="0" max="255" value="200"></p>
+    <p>Turn Gain: <input type="range" id="gain" class="slider" min="0.5" max="2.0" step="0.1" value="1.0"></p>
+
+    <h2>Servot</h2>
+    <p>Servo 1: <input type="range" id="servo0" class="slider" min="0" max="180" value="90"></p>
+    <p>Servo 2: <input type="range" id="servo1" class="slider" min="0" max="180" value="90"></p>
+    <p>Servo 3: <input type="range" id="servo2" class="slider" min="0" max="180" value="90"></p>
+    <p>Servo 4: <input type="range" id="servo3" class="slider" min="0" max="180" value="90"></p>
+
+    <button onclick="sendStop()">STOP</button>
+    <div id="status">Status: Disconnected</div>
+    
+    <script>
+      const joy = document.getElementById('mainJoy');
+      const stick = document.getElementById('stick');
+      const status = document.getElementById('status');
+      let touchX = 0, touchY = 0;
+      let connected = false;
+
+      function updateStick() {
+        const rect = joy.getBoundingClientRect();
+        const centerX = rect.width / 2;
+        const centerY = rect.height / 2;
+        stick.style.left = (centerX + touchX) + 'px';
+        stick.style.top = (centerY + touchY) + 'px';
+      }
+      updateStick();
+
+      joy.addEventListener('touchstart', e => {
+        e.preventDefault();
+        connected = true;
+        status.textContent = 'Status: Connected';
+      });
+
+      joy.addEventListener('touchmove', e => {
+        e.preventDefault();
+        const rect = joy.getBoundingClientRect();
+        touchX = e.touches[0].clientX - rect.left - rect.width / 2;
+        touchY = e.touches[0].clientY - rect.top - rect.height / 2;
+        const maxDist = rect.width / 2;
+        const dist = Math.sqrt(touchX**2 + touchY**2);
+        if (dist > maxDist) {
+          touchX *= maxDist / dist;
+          touchY *= maxDist / dist;
+        }
+        updateStick();
+        sendJoystick();
+      });
+
+      joy.addEventListener('touchend', () => {
+        touchX = touchY = 0;
+        updateStick();
+        sendJoystick();
+        connected = false;
+        status.textContent = 'Status: Disconnected';
+      });
+
+      function sendJoystick() {
+        if (!connected) return;
+        let x = Math.round((touchX / (joy.offsetWidth/2)) * 128 + 128);
+        let y = Math.round((-touchY / (joy.offsetHeight/2)) * 128 + 128);
+        fetch(`/joy?x=${x}&y=${y}`);
+      }
+
+      document.getElementById('speed').addEventListener('input', e => {
+        fetch(`/speed?val=${e.target.value}`);
+      });
+
+      document.getElementById('gain').addEventListener('input', e => {
+        fetch(`/gain?val=${e.target.value}`);
+      });
+
+      for(let i=0;i<4;i++){
+        document.getElementById('servo'+i).addEventListener('input', e => {
+          fetch(`/servo?index=${i}&angle=${e.target.value}`);
+        });
+      }
+
+      function sendStop() {
+        fetch('/stop');
+      }
+
+    </script>
+  </body>
+  </html>
+  )rawliteral";
+
+  server.send(200,"text/html",html);
+}
+
+void handleJoy() {
+  if(server.hasArg("x") && server.hasArg("y")){
+    int x = server.arg("x").toInt();
+    int y = server.arg("y").toInt();
+    char buf[20];
+    sprintf(buf,"J,%d,%d\n",x,y);
+    SerialBT.print(buf);
+  }
+  server.send(200,"text/plain","OK");
+}
+
+void handleSpeed() {
+  if(server.hasArg("val")){
+    SerialBT.print("P");
+    SerialBT.print(server.arg("val"));
+    SerialBT.print("\n");
+  }
+  server.send(200,"text/plain","OK");
+}
+
+void handleGain() {
+  if(server.hasArg("val")){
+    SerialBT.print("T");
+    SerialBT.print(server.arg("val"));
+    SerialBT.print("\n");
+  }
+  server.send(200,"text/plain","OK");
+}
+
+void handleStop() { 
+  SerialBT.print("S\n");
+  server.send(200,"text/plain","OK");
+}
+
+void handleServo(){
+  if(server.hasArg("index") && server.hasArg("angle")){
+    int i = server.arg("index").toInt();
+    int a = server.arg("angle").toInt();
+    char buf[20];
+    sprintf(buf,"V,%d,%d\n",i,a);
+    SerialBT.print(buf);
+  }
+  server.send(200,"text/plain","OK");
+}
+
+void setup() {
+  Serial.begin(115200);
+  SerialBT.begin("RoverBT");
+
+  WiFi.softAP(ssid,password);
+  Serial.print("AP IP address: ");
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/",handleRoot);
+  server.on("/joy",handleJoy);
+  server.on("/speed",handleSpeed);
+  server.on("/gain",handleGain);
+  server.on("/stop",handleStop);
+  server.on("/servo",handleServo);
+  server.begin();
+  Serial.println("UI");
+}
+
+void loop() {
+  server.handleClient();
+  while(SerialBT.available()) {
+    Serial.write(SerialBT.read());
+  }
+}
+
+#else
+
+//L298N
+
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+
+Adafruit_PWMServoDriver pca = Adafruit_PWMServoDriver(0x40);
+
+// 3 channels for 6 motors: left, 3 right paralleled
+
+const int LEFT_ENA = 3;   // PWM for all 3 left motors
+const int LEFT_IN1 = 4;
+const int LEFT_IN2 = 7;
+
+const int RIGHT_ENB = 5;  // PWM for all 3 right motors
+const int RIGHT_IN3 = 8;
+const int RIGHT_IN4 = 9;
+
+int maxPWM = 200;
+float turnGain = 1.0;
+
+#define SERVO_MIN 150
+#define SERVO_MAX 600
+
+String input = "";
+unsigned long lastCmdTime = 0;
+const int timeoutMs = 500;  // 500ms stop timeout
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(LEFT_ENA, OUTPUT);
+  pinMode(LEFT_IN1, OUTPUT);
+  pinMode(LEFT_IN2, OUTPUT);
+  pinMode(RIGHT_ENB, OUTPUT);
+  pinMode(RIGHT_IN3, OUTPUT);
+  pinMode(RIGHT_IN4, OUTPUT);
+
+  Wire.begin();
+  pca.begin();
+  pca.setPWMFreq(60);  // 60 Hz servo frequencyyyyy
+
+  stopAll();
+  Serial.println("Jee. kontrolleri toimiii!");
+}
+
+void loop() {
+  while(Serial.available()) {
+    char c = Serial.read();
+    if(c == '\n') {
+      processLine(input);
+      input = "";
+      lastCmdTime = millis();
+    } else {
+      input += c;
+    }
+  }
+
+  if(millis() - lastCmdTime > timeoutMs) {
+    stopAll();
+  }
+}
+
+void processLine(String line) {
+  line.trim();
+  if(line.startsWith("J")) {
+    int c1 = line.indexOf(',');
+    int c2 = line.indexOf(',', c1 + 1);
+    if(c1 > 0 && c2 > c1) {
+      int x = line.substring(c1 + 1, c2).toInt();
+      int y = line.substring(c2 + 1).toInt();
+      driveJoystick(x, y);
+    }
+  } else if(line.startsWith("P")) {
+    maxPWM = line.substring(1).toInt();
+    Serial.print("Max PWM set to: "); Serial.println(maxPWM);
+  } else if(line.startsWith("T")) {
+    turnGain = line.substring(1).toFloat();
+    Serial.print("Turn gain set to: "); Serial.println(turnGain);
+  } else if(line.startsWith("S")) {
+    stopAll();
+    Serial.println("Stopped");
+  } else if(line.startsWith("V")) {
+    int c1 = line.indexOf(',');
+    int c2 = line.indexOf(',', c1 + 1);
+    int idx = line.substring(c1 + 1, c2).toInt();
+    int angle = line.substring(c2 + 1).toInt();
+    setServo(idx, angle);
+  }
+}
+
+void driveJoystick(int x, int y) {
+  float fx = (x - 128) / 128.0;
+  float fy = (y - 128) / 128.0;
+
+  if(abs(fx) < 0.1) fx = 0;
+  if(abs(fy) < 0.1) fy = 0;
+
+  float left = fy + fx * turnGain;
+  float right = fy - fx * turnGain;
+
+  left = constrain(left, -1, 1);
+  right = constrain(right, -1, 1);
+
+  setLeftMotors(left);
+  setRightMotors(right);
+}
+
+void setLeftMotors(float val) {
+  int pwm = abs(val) * maxPWM;
+  pwm = constrain(pwm, 0, 255);
+  digitalWrite(LEFT_IN1, val>=0?HIGH:LOW);
+  digitalWrite(LEFT_IN2, val>=0?LOW:HIGH);
+  analogWrite(LEFT_ENA, pwm);
+}
+
+void setRightMotors(float val) {
+  int pwm = abs(val) * maxPWM;
+  pwm = constrain(pwm, 0, 255);
+  digitalWrite(RIGHT_IN3, val>=0?HIGH:LOW);
+  digitalWrite(RIGHT_IN4, val>=0?LOW:HIGH);
+  analogWrite(RIGHT_ENB, pwm);
+}
+
+void setServo(int index, int angle){
+  angle = constrain(angle,0,180);
+  int pulse = map(angle,0,180,SERVO_MIN,SERVO_MAX);
+  pca.setPWM(index,0,pulse);  // Servot kanavilla 0-3
+}
+
+//are you even reading this far, void stop all!!
+void stopAll() {
+  analogWrite(LEFT_ENA,0);
+  analogWrite(RIGHT_ENB,0);
+  digitalWrite(LEFT_IN1,LOW);
+  digitalWrite(LEFT_IN2,LOW);
+  digitalWrite(RIGHT_IN3,LOW);
+  digitalWrite(RIGHT_IN4,LOW);
+
+  for(int i=0;i<4;i++){
+    pca.setPWM(i,0,0);  // Stop servos
+  }
+}
+
+#endif
