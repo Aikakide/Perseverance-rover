@@ -202,7 +202,6 @@ void loop() {
 #else
 
 //L298N
-
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
 
@@ -330,7 +329,9 @@ void setServo(int index, int angle){
   pca.setPWM(index,0,pulse);  // Servot kanavilla 0-3
 }
 
-//are you even reading this far, void stop all!!
+//are you even reading this far, void stopall!!
+// Stops all motors and all servos
+//STOP EVERYTHING NOWWWWW, countdown, 3,2,1,0 STOP!
 void stopAll() {
   analogWrite(LEFT_ENA,0);
   analogWrite(RIGHT_ENB,0);
